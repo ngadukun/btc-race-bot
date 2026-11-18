@@ -27,9 +27,11 @@ SYMBOL = "CBBTC"
 SLIP_BPS = 300
 
 DIP_LOOKBACK = 180        # bars (3 hours at 1m)
-DIP_DROP_NUM = 988        # enter when close < ref * 988/1000  (-1.2%)
+DIP_DROP_NUM = 988        # entry hurdle: enter when close < ref * 988/1000 (-1.2%)
 TARGET_NUM = 1008         # dip exit at value >= cost * 1008/1000  (+0.8%)
-STOP_NUM = 988            # exit at value <= cost * 988/1000  (-1.2%)
+STOP_NUM = 988            # exit stop: value <= cost * 988/1000 (-1.2%); same
+                          # number as the entry hurdle by coincidence -- the two
+                          # are tuned separately and must not be merged
 DIP_TIMEOUT = 480         # bars
 
 TREND_LOOKBACK = 360
@@ -48,6 +50,29 @@ peak_value = 0
 traded = False
 
 
+def exit_hit(val, held, seq):
+    """True when the open position must be sold on this bar.
+
+    Every exit rule lives here, in one place, so the dip and trend paths can
+    never drift apart on the shared cost stop: a dip position sells at its
+    profit target, at the cost stop, or on its timeout; a trend position
+    sells on the trailing stop off its peak value, at the same cost stop, or
+    on its own longer timeout. All comparisons are the exact integer tests
+    the strategy was tuned with.
+    """
+    if mode == "dip":
+        return (
+            val * 1000 >= held.cost * TARGET_NUM
+            or val * 1000 <= held.cost * STOP_NUM
+            or seq - entry_seq >= DIP_TIMEOUT
+        )
+    return (
+        val * 1000 <= peak_value * TRAIL_NUM
+        or val * 1000 <= held.cost * STOP_NUM
+        or seq - entry_seq >= TREND_TIMEOUT
+    )
+
+
 def on_batch(state, batch):
     global mode, entry_seq, peak_value, traded
     bar = state.latest.get(SYMBOL)
@@ -62,20 +87,7 @@ def on_batch(state, batch):
         val = state.value(SYMBOL, held.qty)
         if val > peak_value:
             peak_value = val
-        sell = False
-        if mode == "dip":
-            sell = (
-                val * 1000 >= held.cost * TARGET_NUM
-                or val * 1000 <= held.cost * STOP_NUM
-                or state.seq - entry_seq >= DIP_TIMEOUT
-            )
-        else:
-            sell = (
-                val * 1000 <= peak_value * TRAIL_NUM
-                or val * 1000 <= held.cost * STOP_NUM
-                or state.seq - entry_seq >= TREND_TIMEOUT
-            )
-        if sell:
+        if exit_hit(val, held, state.seq):
             mode = None
             return [{"side": "sell", "symbol": SYMBOL, "qty": held.qty,
                      "max_slippage_bps": SLIP_BPS}]
